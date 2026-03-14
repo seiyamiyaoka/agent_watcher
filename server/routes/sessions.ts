@@ -37,6 +37,8 @@ router.get("/", (_req: Request, res: Response) => {
         label: meta.slug || file.id.slice(0, 8),
         gitBranch: meta.gitBranch,
         firstMessage: meta.firstMessage,
+        peerId: "local",
+        peerName: "local",
       });
     }
 

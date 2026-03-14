@@ -10,6 +10,7 @@ interface Props {
   agents: string[];
   onSelectEvent: (event: TimelineEvent) => void;
   selectedEventId: string | null;
+  peerName?: string | null;
 }
 
 export default function Timeline({
@@ -18,6 +19,7 @@ export default function Timeline({
   agents,
   onSelectEvent,
   selectedEventId,
+  peerName,
 }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const svgRef = useRef<SVGSVGElement | null>(null);
@@ -97,6 +99,11 @@ export default function Timeline({
 
   return (
     <div ref={containerRef} className="flex-1 overflow-hidden relative">
+      {peerName && (
+        <div className="absolute top-2 left-2 z-10 bg-gray-800/80 border border-gray-600 rounded px-2 py-1 text-xs text-purple-300">
+          {peerName}
+        </div>
+      )}
       <svg
         ref={svgRefCallback}
         width={dimensions.width}

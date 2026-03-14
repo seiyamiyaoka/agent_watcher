@@ -1,16 +1,33 @@
 import { useState, useMemo, useCallback } from "react";
-import type { EventType, TimelineEvent } from "@/types";
+import type { EventType, TimelineEvent, ViewMode, DisplayMode } from "@/types";
 import { useSessionList, useSessionData } from "@/hooks/useSession";
+import { usePeers, useTeamSessions } from "@/hooks/usePeers";
 import SessionSelector from "@/components/SessionSelector";
 import FilterBar from "@/components/FilterBar";
 import Timeline from "@/components/Timeline";
+import AvatarView from "@/components/AvatarView";
 import DetailPanel from "@/components/DetailPanel";
 import TaskProgress from "@/components/TaskProgress";
+import PeerStatusBar from "@/components/PeerStatusBar";
+import ViewModeToggle from "@/components/ViewModeToggle";
+import DisplayModeToggle from "@/components/DisplayModeToggle";
 
 export default function App() {
-  const { sessions, loading: sessionsLoading } = useSessionList();
+  const [viewMode, setViewMode] = useState<ViewMode>("local");
+  const [displayMode, setDisplayMode] = useState<DisplayMode>("timeline");
+  const { sessions: localSessions, loading: localLoading } = useSessionList();
+  const { sessions: teamSessions, loading: teamLoading } = useTeamSessions();
+  const { peers } = usePeers();
+
+  const sessions = viewMode === "team" ? teamSessions : localSessions;
+  const sessionsLoading = viewMode === "team" ? teamLoading : localLoading;
+
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
-  const { data: session, loading: sessionLoading } = useSessionData(selectedSessionId);
+  const [selectedPeerId, setSelectedPeerId] = useState<string | null>(null);
+  const { data: session, loading: sessionLoading } = useSessionData(
+    selectedSessionId,
+    viewMode === "team" ? selectedPeerId : null,
+  );
 
   const [selectedAgents, setSelectedAgents] = useState<Set<string>>(new Set());
   const [selectedTypes, setSelectedTypes] = useState<Set<EventType>>(new Set());
@@ -23,15 +40,21 @@ export default function App() {
   );
 
   // Initialize filters when session loads
-  const [lastSessionId, setLastSessionId] = useState<string | null>(null);
-  if (session && session.id !== lastSessionId) {
-    setLastSessionId(session.id);
+  const [lastSessionKey, setLastSessionKey] = useState<string | null>(null);
+  const sessionKey = session ? `${selectedPeerId ?? "local"}:${session.id}` : null;
+  if (session && sessionKey !== lastSessionKey) {
+    setLastSessionKey(sessionKey);
     setSelectedAgents(new Set(session.agents.map((a) => a.name)));
     const types = new Set(session.events.map((e) => e.type));
     setSelectedTypes(types);
     setSelectedEvent(null);
     setSearchText("");
   }
+
+  const handleSelectSession = useCallback((id: string, peerId?: string) => {
+    setSelectedSessionId(id);
+    setSelectedPeerId(peerId ?? null);
+  }, []);
 
   const toggleAgent = useCallback((agent: string) => {
     setSelectedAgents((prev) => {
@@ -83,23 +106,43 @@ export default function App() {
     [agents, selectedAgents],
   );
 
+  // Determine peer name for remote sessions
+  const activePeerName = useMemo(() => {
+    if (viewMode !== "team" || !selectedPeerId || selectedPeerId === "local") return null;
+    const selected = sessions.find(
+      (s) => s.id === selectedSessionId && s.peerId === selectedPeerId,
+    );
+    return selected?.peerName ?? selectedPeerId;
+  }, [viewMode, selectedPeerId, selectedSessionId, sessions]);
+
   return (
     <div className="h-screen flex flex-col bg-gray-900">
       {/* header */}
-      <div className="flex items-center gap-4 px-4 py-2 bg-gray-800 border-b border-gray-700">
+      <div className="flex items-center gap-3 px-4 py-2 bg-gray-800 border-b border-gray-700">
         <h1 className="text-sm font-bold text-gray-200 whitespace-nowrap">
           Agent Timeline
         </h1>
+        <DisplayModeToggle mode={displayMode} onChange={setDisplayMode} />
+        <div className="w-px h-5 bg-gray-600" />
+        <ViewModeToggle
+          mode={viewMode}
+          onChange={setViewMode}
+          peerCount={peers.length}
+        />
         <SessionSelector
           sessions={sessions}
           selectedId={selectedSessionId}
-          onSelect={setSelectedSessionId}
+          onSelect={handleSelectSession}
           loading={sessionsLoading}
+          viewMode={viewMode}
         />
         {sessionLoading && (
           <span className="text-gray-400 text-sm">Loading...</span>
         )}
       </div>
+
+      {/* peer status bar */}
+      {viewMode === "team" && <PeerStatusBar peers={peers} />}
 
       {session && (
         <FilterBar
@@ -116,13 +159,24 @@ export default function App() {
       {/* main content */}
       <div className="flex-1 flex overflow-hidden">
         {session ? (
-          <Timeline
-            events={filteredEvents}
-            edges={filteredEdges}
-            agents={filteredAgents}
-            onSelectEvent={setSelectedEvent}
-            selectedEventId={selectedEvent?.id ?? null}
-          />
+          displayMode === "avatar" ? (
+            <AvatarView
+              events={filteredEvents}
+              agents={filteredAgents}
+              onSelectEvent={setSelectedEvent}
+              selectedEventId={selectedEvent?.id ?? null}
+              peerName={activePeerName}
+            />
+          ) : (
+            <Timeline
+              events={filteredEvents}
+              edges={filteredEdges}
+              agents={filteredAgents}
+              onSelectEvent={setSelectedEvent}
+              selectedEventId={selectedEvent?.id ?? null}
+              peerName={activePeerName}
+            />
+          )
         ) : (
           <div className="flex-1 flex items-center justify-center text-gray-500">
             Select a session to view the timeline

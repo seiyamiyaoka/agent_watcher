@@ -51,6 +51,8 @@ export interface SessionSummary {
   label: string;
   gitBranch?: string;
   firstMessage?: string;
+  peerId?: string;
+  peerName?: string;
 }
 
 export interface SessionData {
@@ -67,3 +69,16 @@ export interface TaskInfo {
   status: "pending" | "in_progress" | "completed";
   owner?: string;
 }
+
+export interface PeerInfo {
+  id: string;
+  name: string;
+  host: string;
+  port: number;
+  status: "online" | "offline" | "error";
+  lastSeen: string;
+}
+
+export type ViewMode = "local" | "team";
+
+export type DisplayMode = "timeline" | "avatar";
