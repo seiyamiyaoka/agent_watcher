@@ -1,4 +1,6 @@
+import fs from "fs";
 import type { JsonlEntry, ContentBlock } from "./jsonl-parser.js";
+import { parseOutputFile } from "./jsonl-parser.js";
 import type { TimelineEvent, EventType, Agent, TaskInfo } from "../../src/types/index.js";
 
 let eventCounter = 0;
@@ -33,8 +35,18 @@ function extractToolEvents(
   for (const block of msg.content) {
     if (block.type !== "tool_use" || !block.name) continue;
 
-    const eventType = TOOL_TYPE_MAP[block.name];
-    if (!eventType) continue;
+    let eventType = TOOL_TYPE_MAP[block.name];
+    // Map MCP and other tools to appropriate event types
+    if (!eventType) {
+      if (block.name.startsWith("mcp__")) {
+        // Treat MCP tool calls as bash-like external operations
+        eventType = "bash";
+      } else if (block.name === "ToolSearch") {
+        continue; // Skip internal tool lookups
+      } else {
+        continue;
+      }
+    }
 
     const input = block.input || {};
     const event: TimelineEvent = {
@@ -100,6 +112,14 @@ function buildSummary(toolName: string, input: Record<string, unknown>): string 
     case "ExitPlanMode":
       return "Plan ready";
     default:
+      // Handle MCP tools
+      if (toolName.startsWith("mcp__")) {
+        const parts = toolName.split("__");
+        const server = parts[1] || "";
+        const method = parts[2] || "";
+        const arg = input.owner ? `${input.owner}/${input.repo}` : String(Object.values(input)[0] || "").slice(0, 30);
+        return `${server}/${method}: ${arg}`;
+      }
       return toolName;
   }
 }
@@ -240,6 +260,22 @@ export interface ExtractionResult {
   tasks: TaskInfo[];
 }
 
+/**
+ * Extract output-file path from a <task-notification> XML string.
+ */
+function extractOutputFilePath(content: string): string | null {
+  const match = content.match(/<output-file>([^<]+)<\/output-file>/);
+  return match ? match[1] : null;
+}
+
+/**
+ * Extract task-id (agentId) from a <task-notification> XML string.
+ */
+function extractTaskId(content: string): string | null {
+  const match = content.match(/<task-id>([^<]+)<\/task-id>/);
+  return match ? match[1] : null;
+}
+
 export function extractEvents(entries: JsonlEntry[]): ExtractionResult {
   eventCounter = 0;
   const events: TimelineEvent[] = [];
@@ -254,11 +290,11 @@ export function extractEvents(entries: JsonlEntry[]): ExtractionResult {
     sessionId: mainSessionId,
   });
 
-  // Phase 1: Build agentId → agentName mapping by scanning Agent tool_use blocks
-  // The Agent tool_use has input.name, and the progress entries have data.agentId
-  // We need to find: Agent tool_use (with parentToolUseID) → first progress entry with that parentToolUseID → agentId
+  // Phase 1: Build agentId → agentName mapping from Agent tool_use blocks
+  // and collect output file paths from task-notification entries
   const agentIdToName = new Map<string, string>();
   const toolUseIdToAgentName = new Map<string, string>();
+  const agentOutputFiles = new Map<string, string>(); // agentId → output file path
 
   // First pass: find Agent tool_use blocks and extract name
   for (const entry of entries) {
@@ -277,8 +313,59 @@ export function extractEvents(entries: JsonlEntry[]): ExtractionResult {
     }
   }
 
-  // Second pass: find progress entries and map agentId to name
-  // Progress entries have parentToolUseID that links to the Agent tool_use
+  // Second pass: find agentId from tool_result responses and task-notification entries
+  for (const entry of entries) {
+    if (entry.type !== "user" && entry.type !== "queue-operation") continue;
+
+    // Handle tool_result with agentId (Agent launch response)
+    if (entry.type === "user" && entry.message) {
+      const content = entry.message.content;
+      if (Array.isArray(content)) {
+        for (const block of content) {
+          if (block.type === "tool_result" && block.tool_use_id) {
+            const agentName = toolUseIdToAgentName.get(block.tool_use_id);
+            if (!agentName) continue;
+
+            // Extract agentId from the result text
+            const resultText = typeof block.content === "string"
+              ? block.content
+              : Array.isArray(block.content)
+                ? block.content.map((c: ContentBlock) => c.text || "").join("")
+                : "";
+
+            const agentIdMatch = resultText.match(/agentId:\s*(\S+)/);
+            if (agentIdMatch) {
+              agentIdToName.set(agentIdMatch[1], agentName);
+            }
+          }
+        }
+      }
+
+      // Handle task-notification in user message content (string format)
+      const msgContent = entry.message.content;
+      if (typeof msgContent === "string" && (msgContent as string).includes("<task-notification>")) {
+        const taskId = extractTaskId(msgContent as string);
+        const outputFile = extractOutputFilePath(msgContent as string);
+        if (taskId && outputFile) {
+          agentOutputFiles.set(taskId, outputFile);
+        }
+      }
+    }
+
+    // Handle queue-operation with task-notification
+    if (entry.type === "queue-operation") {
+      const content = entry.content || "";
+      if (content.includes("<task-notification>")) {
+        const taskId = extractTaskId(content);
+        const outputFile = extractOutputFilePath(content);
+        if (taskId && outputFile) {
+          agentOutputFiles.set(taskId, outputFile);
+        }
+      }
+    }
+  }
+
+  // Also check progress entries for agentId mapping (legacy format)
   for (const entry of entries) {
     if (entry.type !== "progress" || !entry.data) continue;
     const data = entry.data as Record<string, unknown>;
@@ -293,7 +380,7 @@ export function extractEvents(entries: JsonlEntry[]): ExtractionResult {
     }
   }
 
-  // Phase 2: Extract events from all entries
+  // Phase 2: Extract events from main session entries (lead agent events)
   for (const entry of entries) {
     const resolved = getMessageFromEntry(entry);
     if (!resolved) continue;
@@ -351,6 +438,53 @@ export function extractEvents(entries: JsonlEntry[]): ExtractionResult {
       events.push(...extractErrorEvents(syntheticEntry, agentName));
     }
   }
+
+  // Phase 3: Parse sub-agent output files and extract their events
+  for (const [agentId, outputFilePath] of agentOutputFiles) {
+    const agentName = agentIdToName.get(agentId);
+    if (!agentName) continue;
+
+    // Register agent if not yet registered
+    if (!agentMap.has(agentName)) {
+      agentMap.set(agentName, {
+        name: agentName,
+        role: "general-purpose",
+        sessionId: agentId,
+        parentSessionId: mainSessionId,
+      });
+    }
+
+    // Read and parse the output file
+    if (!fs.existsSync(outputFilePath)) continue;
+
+    const subEntries = parseOutputFile(outputFilePath);
+    for (const subEntry of subEntries) {
+      if (subEntry.type === "assistant") {
+        const syntheticEntry: JsonlEntry = {
+          type: subEntry.type,
+          sessionId: agentId,
+          timestamp: subEntry.timestamp,
+          message: subEntry.message,
+        };
+        const toolEvents = extractToolEvents(syntheticEntry, agentName);
+        events.push(...toolEvents);
+        events.push(...extractTextDecisions(syntheticEntry, agentName));
+      }
+
+      if (subEntry.type === "user") {
+        const syntheticEntry: JsonlEntry = {
+          type: subEntry.type,
+          sessionId: agentId,
+          timestamp: subEntry.timestamp,
+          message: subEntry.message,
+        };
+        events.push(...extractErrorEvents(syntheticEntry, agentName));
+      }
+    }
+  }
+
+  // Sort all events by timestamp
+  events.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
 
   // Extract tasks from TaskCreate/TaskUpdate events
   for (const evt of events) {

@@ -16,11 +16,13 @@ export interface JsonlEntry {
   parentToolUseID?: string;
   message?: {
     role?: string;
-    content?: ContentBlock[];
+    content?: ContentBlock[] | string;
     model?: string;
     stop_reason?: string;
   };
   data?: Record<string, unknown>;
+  content?: string; // queue-operation entries have top-level content
+  operation?: string; // queue-operation entries
 }
 
 export interface ContentBlock {
@@ -81,6 +83,14 @@ export function parseJsonlFile(filePath: string): JsonlEntry[] {
   }
 
   return entries;
+}
+
+/**
+ * Parse a sub-agent output file (same JSONL format as session files).
+ * These are stored at paths like /private/tmp/claude-501/.../tasks/{agentId}.output
+ */
+export function parseOutputFile(filePath: string): JsonlEntry[] {
+  return parseJsonlFile(filePath);
 }
 
 export function getSessionMetadata(
